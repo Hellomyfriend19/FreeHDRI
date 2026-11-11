@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>FreeHDRI</title>
+<!-- Must be served over HTTPS (camera + motion sensors require it). GitHub Pages or Netlify work for free. -->
+<style>
+:root{--bg:#000;--fg:#f5f5f7;--dim:#98989d;--card:rgba(28,28,30,.88);--acc:#0a84ff;--sat:env(safe-area-inset-top,0px);--sab:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:16px -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;overflow:hidden;overscroll-behavior:none;touch-action:none}
+#v,#gl{position:fixed;inset:0;width:100%;height:100dvh;object-fit:cover}
+#v{display:none}#gl{display:none}
+.scr{position:fixed;inset:0;height:100dvh;display:none;padding:calc(var(--sat) + 20px) 22px calc(var(--sab) + 20px);flex-direction:column}
+.scr.on{display:flex}
+.center{justify-content:center;align-items:center;text-align:center;gap:14px;background:#000}
+h1{font-size:34px;font-weight:700;letter-spacing:-.02em;margin:0}
+p{margin:0;color:var(--dim);line-height:1.45;font-size:15px}
+.small{font-size:12px;color:var(--dim);line-height:1.4}
+button{font:inherit;color:var(--fg);background:rgba(120,120,128,.32);border:0;border-radius:999px;padding:12px 20px;font-weight:600}
+button.pri{background:var(--acc)}button:active{opacity:.7}button:disabled{opacity:.35}
+.row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.err{color:#ff453a;font-size:14px;max-width:320px;line-height:1.4}
+#cap{pointer-events:none;justify-content:space-between}
+#cap button{pointer-events:auto}
+.bar{height:3px;background:rgba(255,255,255,.25);border-radius:2px;overflow:hidden;margin-top:8px}
+.bar>i{display:block;height:100%;width:0;background:#fff;transition:width .2s}
+.glass{background:var(--card);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border-radius:18px;padding:12px 16px}
+#ret{position:fixed;left:50%;top:50%;width:72px;height:72px;margin:-36px 0 0 -36px;pointer-events:none;display:none}
+#ret circle{fill:none;stroke-width:3}
+#arrow{position:fixed;left:0;top:0;font-size:26px;color:#fff;display:none;pointer-events:none;text-shadow:0 0 8px #000}
+#flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
+#sheet{position:fixed;left:0;right:0;bottom:0;max-height:80dvh;overflow:auto;background:#1c1c1e;border-radius:22px 22px 0 0;padding:18px 20px calc(var(--sab) + 20px);transform:translateY(105%);transition:transform .3s;z-index:20;touch-action:pan-y}
+#sheet.on{transform:none}
+#sheet label{display:flex;justify-content:space-between;align-items:center;margin:14px 0 4px;font-size:14px}
+#sheet input[type=range]{width:100%}select{font:inherit;background:#2c2c2e;color:var(--fg);border:0;border-radius:8px;padding:6px}
+#pv{width:100%;border-radius:12px;background:#111;aspect-ratio:2/1}
+#resui{margin-top:auto;pointer-events:none}#resui *{pointer-events:auto}
+#rot{position:fixed;inset:0;background:#000;display:none;align-items:center;justify-content:center;z-index:50;color:var(--dim)}
+@media (orientation:landscape) and (max-height:500px){#rot{display:flex}}
+</style>
+</head>
+<body>
+<video id="v" playsinline muted autoplay></video>
+<canvas id="gl"></canvas>
+
+<div id="start" class="scr center on">
+  <h1>FreeHDRI</h1>
+  <p style="max-width:300px">Stand in one spot. Turn your body, not just your arms. Hold the phone close to your chest and aim at each dot. Start with the phone held upright.</p>
+  <p class="small" style="max-width:300px">Motion: to know which way you're pointing.<br>Camera: to photograph your surroundings.</p>
+  <button class="pri" id="btnStart">Start</button>
+  <div id="err" class="err"></div>
+  <button id="btnSet0">Settings</button>
+</div>
+
+<div id="cap" class="scr">
+  <div class="glass" style="display:flex;flex-direction:column;margin-right:56px">
+    <div style="display:flex;justify-content:space-between"><b id="prog">0 / 0</b><span class="small" id="hint">Aim at the pulsing dot</span></div>
+    <div class="bar"><i id="pbar"></i></div>
+  </div>
+  <button id="btnSet1" style="position:fixed;right:18px;top:calc(var(--sat) + 20px);padding:10px 14px;pointer-events:auto">⚙︎</button>
+  <div class="row"><button id="btnUndo">Undo last</button><button id="btnSkip">Skip</button><button id="btnFinish" class="pri">Finish</button></div>
+</div>
+<svg id="ret" viewBox="0 0 72 72"><circle cx="36" cy="36" r="30" stroke="rgba(255,255,255,.6)"/><circle id="retp" cx="36" cy="36" r="30" stroke="#fff" stroke-linecap="round" stroke-dasharray="0 189" transform="rotate(-90 36 36)"/></svg>
+<div id="arrow">▲</div><div id="flash"></div>
+
+<div id="proc" class="scr center">
+  <h1 style="font-size:26px">Stitching…</h1>
+  <canvas id="pv" width="512" height="256"></canvas>
+  <div class="bar" style="width:100%"><i id="sbar"></i></div>
+  <p id="stxt">Preparing</p>
+</div>
+
+<div id="res" class="scr">
+  <div id="resui">
+    <div class="glass">
+      <div class="row">
+        <button class="pri" id="dJpg">JPG</button><button id="dPng">PNG</button><button class="pri" id="dHdr">.hdr</button><button id="dShare">Share</button>
+      </div>
+      <label style="display:flex;justify-content:space-between;margin:12px 0 2px;font-size:14px">Highlight boost <span id="hbv">10×</span></label>
+      <input id="hb" type="range" min="0" max="60" value="10" style="width:100%">
+      <p class="small" style="margin-top:8px">Browsers can't lock exposure or bracket exposures, so the .hdr is a linearized, tone-expanded single-exposure panorama. It is good for believable lighting and reflections, but not a true multi-exposure HDR.</p>
+      <div class="row" style="margin-top:10px"><button id="again">Capture again</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="sheet">
+  <b style="font-size:18px">Settings</b>
+  <label>Camera FOV (vertical) <span id="fovv">63°</span></label><input id="fov" type="range" min="40" max="90" step=".5" value="63">
+  <label>Dot layout <select id="preset"><option value="fast">Fast ~24</option><option value="std" selected>Standard ~46</option><option value="high">High ~80</option></select></label>
+  <label>Hold time <span id="holdv">1000 ms</span></label><input id="hold" type="range" min="400" max="2500" step="100" value="1000">
+  <label>Photo quality <select id="qual"><option value="2048">Fast 2K</option><option value="4096" selected>Good 4K</option></select></label>
+  <label>Output resolution <select id="outw"><option value="4096" selected>4096 × 2048</option><option value="2048">2048 × 1024</option></select></label>
+  <label>Auto-align photos <input id="align" type="checkbox" checked></label>
+  <label>Snap to dot grid <input id="snap" type="checkbox"></label>
+  <p class="small" style="margin-top:12px">Snap uses each dot's ideal direction instead of the measured rotation. Use it if measured rotations look noisy. Layout changes apply when no photos are captured yet.</p>
+  <div class="row" style="margin-top:16px"><button class="pri" id="sheetClose">Done</button></div>
+</div>
+<div id="rot">Rotate to portrait</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+/* ============ 0. CONFIG ============ */
+// Dot rings: elevation (deg) and count. |elevation| 90 = single zenith/nadir dot.
+const PRESETS={
+  fast:[{e:0,n:9},{e:45,n:6},{e:-45,n:6},{e:90,n:1},{e:-90,n:1}],
+  std:[{e:0,n:12},{e:35,n:10},{e:-35,n:10},{e:65,n:6},{e:-65,n:6},{e:90,n:1},{e:-90,n:1}],
+  high:[{e:0,n:16},{e:30,n:14},{e:-30,n:14},{e:58,n:10},{e:-58,n:10},{e:80,n:5},{e:-80,n:5},{e:90,n:1},{e:-90,n:1}]
+};
+const S={align:true,fov:63,hold:1000,outW:4096,maxSide:4096,snap:false,preset:'std'};
+const R=10, D2R=Math.PI/180, HIT_DEG=3, MAX_SPEED=15; // capture when within 3° and slower than 15°/s
+const $=id=>document.getElementById(id), V3=THREE.Vector3, Q=THREE.Quaternion;
+const LUT=new Float32Array(256).map((_,i)=>{const c=i/255;return c<=.04045?c/12.92:Math.pow((c+.055)/1.055,2.4)});
+
+/* ============ 1. RENDERER / SCREENS ============ */
+const video=$('v'), glc=$('gl');
+const renderer=new THREE.WebGLRenderer({canvas:glc,alpha:true,antialias:true,preserveDrawingBuffer:false});
+renderer.setClearColor(0x000000,0);
+function resize(){renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight,false);
+  [capCam,vCam].forEach(c=>{c.aspect=innerWidth/innerHeight;c.updateProjectionMatrix()})}
+let state='start';
+function show(s){state=s;['start','cap','proc','res'].forEach(k=>$(k).classList.toggle('on',k===s));
+  video.style.display=s==='cap'?'block':'none';glc.style.display=(s==='cap'||s==='res')?'block':'none';
+  $('ret').style.display=s==='cap'?'block':'none';if(s!=='cap')$('arrow').style.display='none'}
+document.addEventListener('gesturestart',e=>e.preventDefault());
+document.addEventListener('touchmove',e=>{if(!e.target.closest('#sheet'))e.preventDefault()},{passive:false});
+try{screen.orientation&&screen.orientation.lock&&screen.orientation.lock('portrait').catch(()=>{})}catch(e){}
+
+/* ============ 2. PERMISSIONS ============ */
+let stream=null,wake=null,lastEv=null,motionBound=false;
+async function askMotion(){ // "Motion: to know which way you're pointing" - must run inside the tap handler on iOS
+  if(typeof DeviceOrientationEvent==='undefined')throw new Error('nomotion');
+  if(DeviceOrientationEvent.requestPermission){const r=await DeviceOrientationEvent.requestPermission();if(r!=='granted')throw new Error('motion-denied')}
+  if(!motionBound){motionBound=true;addEventListener('deviceorientation',e=>{if(e.alpha!==null&&e.beta!==null)lastEv=e})}
+}
+async function askCamera(){ // "Camera: to photograph your surroundings"
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:3840},height:{ideal:2160}},audio:false});
+  video.srcObject=stream;await video.play();
+}
+async function askWake(){try{wake=await navigator.wakeLock.request('screen')}catch(e){}}
+function waitEv(ms=2000){return new Promise((res,rej)=>{const t0=performance.now();(function k(){if(lastEv)res();else if(performance.now()-t0>ms)rej(new Error('nomotion'));else setTimeout(k,50)})()})}
+function errText(e){
+  if(e.message==='motion-denied')return'Motion access was denied. Open Settings › Safari › Motion & Orientation Access (or reload and allow it), then try again.';
+  if(e.message==='nomotion')return'No motion sensor data. Use an iPhone in Safari over HTTPS, and allow Motion & Orientation access.';
+  if(e.name==='NotAllowedError')return'Camera access was denied. Open Settings › Safari › Camera, set it to Ask or Allow, then reload.';
+  return'Could not start: '+(e.message||e.name)}
+
+/* ============ 3. ROTATION TRACKING ============ */
+// deviceorientation -> quaternion (standard three.js DeviceOrientationControls math):
+//  Euler(beta, alpha, -gamma, 'YXZ'), then q1 turns the phone's screen-normal into the back camera's view axis (-Z),
+//  then a rotation about Z removes screen orientation. Result = camera orientation in an arbitrary world frame.
+// Everything is made RELATIVE to the pose at Start: rel = inverse(q0) * q. Identity means "looking at the start direction".
+// No compass, no gyro integration: the orientation is read fresh every frame.
+const _e=new THREE.Euler(),_q1=new Q(-Math.SQRT1_2,0,0,Math.SQRT1_2),_qs=new Q(),_zee=new V3(0,0,1);
+function deviceQuat(a,b,g,orient,out){
+  _e.set(b*D2R,a*D2R,-g*D2R,'YXZ');out.setFromEuler(_e);
+  out.multiply(_q1);out.multiply(_qs.setFromAxisAngle(_zee,-orient*D2R));return out}
+const q0inv=new Q(),curQ=new Q(),relQ=new Q(),prevQ=new Q();
+function screenAngle(){return(screen.orientation?screen.orientation.angle:window.orientation)||0}
+function setReference(){deviceQuat(lastEv.alpha,lastEv.beta,lastEv.gamma,screenAngle(),curQ);q0inv.copy(curQ).invert();relQ.identity();prevQ.identity()}
+function readRel(){if(!lastEv)return;deviceQuat(lastEv.alpha,lastEv.beta,lastEv.gamma,screenAngle(),curQ);relQ.copy(q0inv).multiply(curQ)}
+
+/* ============ 4. DOT LAYOUT + CAPTURE SCENE ============ */
+const capScene=new THREE.Scene(),capCam=new THREE.PerspectiveCamera(S.fov,innerWidth/innerHeight,.1,100);
+let dots=[],caps=[],hist=[];
+const dotTex=(()=>{const c=document.createElement('canvas');c.width=c.height=64;const g=c.getContext('2d');
+  g.fillStyle='#fff';g.shadowColor='rgba(0,0,0,.6)';g.shadowBlur=6;g.beginPath();g.arc(32,32,20,0,7);g.fill();return new THREE.CanvasTexture(c)})();
+function dirFor(el,az){return new V3(Math.cos(el)*Math.sin(az),Math.sin(el),-Math.cos(el)*Math.cos(az))} // forward = -Z, right = +X, up = +Y
+function buildDots(){
+  dots.forEach(d=>capScene.remove(d.spr));dots=[];
+  PRESETS[S.preset].forEach((r,ri)=>{for(let i=0;i<r.n;i++){
+    const polar=Math.abs(r.e)===90, az=(i/r.n+(ri%2?.5/r.n:0))*2*Math.PI;
+    const dir=polar?new V3(0,Math.sign(r.e),0):dirFor(r.e*D2R,az);
+    const spr=new THREE.Sprite(new THREE.SpriteMaterial({map:dotTex,depthTest:false,transparent:true,opacity:.95}));
+    spr.position.copy(dir).multiplyScalar(R);spr.renderOrder=10;capScene.add(spr);
+    dots.push({dir,spr,done:false})}})}
+function quatForDir(dir){ // ideal camera rotation looking at a dot (used by "Snap to dot grid")
+  const up=dir.y>.99?new V3(0,0,1):dir.y<-.99?new V3(0,0,-1):new V3(0,1,0);
+  return new Q().setFromRotationMatrix(new THREE.Matrix4().lookAt(new V3(),dir,up))}
+
+/* ============ 5. CAPTURE STATE MACHINE ============ */
+let target=-1,holdT0=null,speed=0,lastT=0,busy=false,lastFov=0;
+const pinMat=()=>new THREE.ShaderMaterial({transparent:true,depthTest:false,depthWrite:false,uniforms:{map:{value:null},op:{value:.8}},
+  vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+  fragmentShader:'varying vec2 vUv;uniform sampler2D map;uniform float op;void main(){vec2 d=min(vUv,1.-vUv);float a=smoothstep(0.,.12,d.x)*smoothstep(0.,.12,d.y);gl_FragColor=vec4(texture2D(map,vUv).rgb,a*op);}'});
+function doneCount(){return dots.filter(d=>d.done).length}
+function updateProg(){const n=doneCount();$('prog').textContent=n+' / '+dots.length;$('pbar').style.width=(100*n/dots.length)+'%';$('btnUndo').disabled=!hist.length;$('btnFinish').disabled=!caps.length}
+function startCapture(){
+  buildDots();caps.forEach(c=>{capScene.remove(c.group);c.thumbTex.dispose()});caps=[];hist=[];
+  target=-1;holdT0=null;busy=false;updateProg();show('cap');lastT=performance.now()}
+async function capture(i){
+  busy=true;const dq=relQ.clone(); // rotation snapshot at the moment of the frame grab
+  const vw=video.videoWidth,vh=video.videoHeight,sc=Math.min(1,S.maxSide/Math.max(vw,vh));
+  const c=document.createElement('canvas');c.width=Math.round(vw*sc);c.height=Math.round(vh*sc);c.getContext('2d').drawImage(video,0,0,c.width,c.height);
+  const tc=document.createElement('canvas');tc.width=512;tc.height=Math.round(512*c.height/c.width);tc.getContext('2d').drawImage(c,0,0,tc.width,tc.height);
+  navigator.vibrate&&navigator.vibrate(30);$('flash').style.opacity=.7;setTimeout(()=>$('flash').style.opacity=0,80);
+  const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',.92)); // store as JPEG blob, not raw pixels (memory safety)
+  const thumbTex=new THREE.CanvasTexture(tc);thumbTex.minFilter=THREE.LinearFilter;thumbTex.generateMipmaps=false;
+  const asp=c.width/c.height,h=2*R*.98*Math.tan(S.fov*D2R/2);
+  const mesh=new THREE.Mesh(new THREE.PlaneGeometry(h*asp,h),pinMat());mesh.material.uniforms.map.value=thumbTex;mesh.position.z=-R*.98;
+  const group=new THREE.Group();group.quaternion.copy(dq);group.add(mesh);capScene.add(group); // photo pinned using its stored quaternion + FOV
+  const cap={blob,q:dq,idx:i,asp,thumbTex,group};caps.push(cap);dots[i].done=true;dots[i].spr.visible=false;hist.push({i,cap});
+  holdT0=null;busy=false;updateProg()}
+function skip(){if(target<0)return;dots[target].done=true;dots[target].spr.visible=false;hist.push({i:target,cap:null});holdT0=null;updateProg()}
+function undo(){const h=hist.pop();if(!h)return;dots[h.i].done=false;dots[h.i].spr.visible=true;
+  if(h.cap){capScene.remove(h.cap.group);h.cap.thumbTex.dispose();caps.pop()}holdT0=null;updateProg()}
+const _f=new V3(),_iq=new Q();
+function capFrame(t){
+  const dt=Math.max(.001,(t-lastT)/1000);lastT=t;readRel();
+  const ang=2*Math.acos(Math.min(1,Math.abs(relQ.dot(prevQ))))/D2R; // angle between consecutive quaternions
+  speed+=(ang/dt-speed)*.15;prevQ.copy(relQ); // smoothed deg/s
+  if(S.fov!==lastFov){capCam.fov=S.fov;capCam.updateProjectionMatrix();lastFov=S.fov}
+  capCam.quaternion.copy(relQ);
+  _f.set(0,0,-1).applyQuaternion(relQ);
+  if(holdT0===null){let best=-1,bd=-2;dots.forEach((d,i)=>{if(!d.done){const k=d.dir.dot(_f);if(k>bd){bd=k;best=i}}});target=best}
+  let p=0;
+  if(target>=0&&!busy){
+    const err=Math.acos(Math.min(1,dots[target].dir.dot(_f)))/D2R;
+    if(err<HIT_DEG&&speed<MAX_SPEED){if(holdT0===null)holdT0=t;p=Math.min(1,(t-holdT0)/S.hold);if(p>=1)capture(target)}else holdT0=null}
+  dots.forEach((d,i)=>{if(d.done)return;const s=i===target?.7+.15*Math.sin(t/180):.4;d.spr.scale.setScalar(i===target?s*(1-p*.8):s)});
+  $('retp').setAttribute('stroke-dasharray',(189*p)+' 189');
+  arrow();
+  if(target<0&&!busy&&doneCount()===dots.length&&caps.length){stitch();return}
+  renderer.render(capScene,capCam)}
+function arrow(){ // edge arrow when the target dot is off screen
+  const a=$('arrow');if(target<0){a.style.display='none';return}
+  const v=dots[target].dir.clone().applyQuaternion(_iq.copy(relQ).invert()),tf=Math.tan(S.fov*D2R/2),as=innerWidth/innerHeight;
+  if(v.z<0){const nx=v.x/-v.z/(tf*as),ny=v.y/-v.z/tf;if(Math.abs(nx)<.9&&Math.abs(ny)<.9){a.style.display='none';return}}
+  let ux=v.x,uy=v.y,l=Math.hypot(ux,uy);if(l<1e-4){ux=0;uy=-1;l=1}ux/=l;uy/=l;
+  const k=Math.min((innerWidth/2-40)/Math.max(Math.abs(ux),1e-3),(innerHeight/2-150)/Math.max(Math.abs(uy),1e-3));
+  a.style.display='block';a.style.transform=`translate(${innerWidth/2+ux*k-13}px,${innerHeight/2-uy*k-13}px) rotate(${Math.atan2(ux,uy)}rad)`}
+
+/* ============ 6. STITCHING (WebGL, equirect) ============ */
+const uScene=new THREE.Scene(),uCam=new THREE.OrthographicCamera(-1,1,1,-1,0,1),uQuad=new THREE.Mesh(new THREE.PlaneGeometry(2,2));uScene.add(uQuad);
+const VS='varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.,1.);}';
+const GLSL_SRGB='vec3 s2l(vec3 c){return mix(c/12.92,pow((c+.055)/1.055,vec3(2.4)),step(.04045,c));}vec3 l2s(vec3 c){return mix(c*12.92,1.055*pow(max(c,vec3(0.)),vec3(1./2.4))-.055,step(.0031308,c));}';
+// Per photo: for every output pixel build the 3D direction from lon/lat, rotate it into the photo's camera space with
+// inverse(q), project with FOV/aspect, sample if inside the frame. Output = (linear color*gain*w, w) so additive blending accumulates.
+const photoMat=new THREE.ShaderMaterial({depthTest:false,depthWrite:false,vertexShader:VS,
+  uniforms:{map:{value:null},m:{value:new THREE.Matrix3()},tf:{value:1},asp:{value:1},gain:{value:1},raw:{value:0}},
+  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D map;uniform mat3 m;uniform float tf,asp,gain,raw;'+GLSL_SRGB+
+  `void main(){float lon=(vUv.x-.5)*6.2831853,lat=(vUv.y-.5)*3.1415927;
+   vec3 d=vec3(sin(lon)*cos(lat),sin(lat),-cos(lon)*cos(lat));vec3 p=m*d;
+   if(p.z>-1e-3){gl_FragColor=vec4(0.);return;}
+   vec2 n=vec2(p.x/(-p.z)/(tf*asp),p.y/(-p.z)/tf);vec2 e=1.-abs(n);
+   if(e.x<=0.||e.y<=0.){gl_FragColor=vec4(0.);return;}
+   float w=smoothstep(0.,.3,e.x)*smoothstep(0.,.3,e.y);
+   float w2=pow(smoothstep(0.,1.,e.x)*smoothstep(0.,1.,e.y),3.)+.002; // sharp falloff: the photo nearest its own centre dominates, so ghosts only show in a narrow seam
+   vec3 c=texture2D(map,n*.5+.5).rgb;
+   gl_FragColor=raw>.5?vec4(c,w):vec4(s2l(c)*gain*w2,w2);}`});
+const copyMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{map:{value:null}},
+  fragmentShader:'varying vec2 vUv;uniform sampler2D map;void main(){gl_FragColor=texture2D(map,vUv);}'});
+// Final: divide by weight; fill holes from blurred coarse levels (pyramid of exact 2x2 box averages of the premultiplied accumulation).
+const finMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{acc:{value:null},f1:{value:null},f2:{value:null},f3:{value:null},fill:{value:1}},
+  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D acc,f1,f2,f3;uniform float fill;'+GLSL_SRGB+
+  `vec3 lv(sampler2D t,out float ok){vec4 c=texture2D(t,vUv);ok=step(.01,c.a);return c.rgb/max(c.a,1e-4);}
+   void main(){vec4 a=texture2D(acc,vUv);vec3 col=a.rgb/max(a.a,1e-5);vec3 bg=vec3(.08);
+   if(fill>.5){float o1,o2,o3;vec3 c1=lv(f1,o1),c2=lv(f2,o2),c3=lv(f3,o3);bg=o1>.5?c1:o2>.5?c2:o3>.5?c3:vec3(.05);}
+   float t=smoothstep(0.,.0015,a.a);gl_FragColor=vec4(l2s(mix(bg,col,t)),1.);}`});
+function pass(mat,rt){uQuad.material=mat;renderer.setRenderTarget(rt);renderer.render(uScene,uCam);renderer.setRenderTarget(null)}
+const HF={type:THREE.HalfFloatType,minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,depthBuffer:false,generateMipmaps:false};
+const m4=new THREE.Matrix4(),tick=()=>new Promise(r=>setTimeout(r,0));
+let outRT=null,outW=0,outH=0;
+function quatFor(c){return c.qa} // refined rotation (set at the start of stitch())
+function setPhoto(c,tex,raw,gain){const u=photoMat.uniforms;u.map.value=tex;m4.makeRotationFromQuaternion(quatFor(c).clone().invert());u.m.value.setFromMatrix4(m4);
+  u.tf.value=Math.tan(S.fov*D2R/2);u.asp.value=c.asp;u.gain.value=gain;u.raw.value=raw}
+function rtToImageData(rt,w,h){const b=new Uint8Array(w*h*4),o=new Uint8ClampedArray(w*h*4);renderer.readRenderTargetPixels(rt,0,0,w,h,b);
+  for(let y=0;y<h;y++)o.set(b.subarray((h-1-y)*w*4,(h-y)*w*4),y*w*4);return new ImageData(o,w,h)}
+/* ---- 6.0 ALIGNMENT: refine each photo's rotation by matching image patches inside overlaps.
+   Orientation sensors drift and hands wobble, so the measured quaternions are off by a few degrees -> doubled objects.
+   Each round: render every photo alone into a small equirect, run zero-mean normalized cross-correlation (ZNCC) block matching
+   between overlapping photo pairs, turn every match into a small world-space rotation (B->A) and nudge both photos by half of it.
+   Coarse-to-fine: 2 rounds at 512px, 2 rounds at 1024px. Parallax can't be fixed by rotation; the sharper blend weights below hide the rest. */
+const eqDir=(w,h,x,y,o)=>{const lon=((x+.5)/w-.5)*6.2831853,lat=((y+.5)/h-.5)*3.1415927,c=Math.cos(lat);return o.set(Math.sin(lon)*c,Math.sin(lat),-Math.cos(lon)*c)};
+async function align(){
+  const n=caps.length,P=7,SR=6,dq=new Q(),A=new V3(),B=new V3(),X=new V3(),fw=caps.map(()=>new V3());
+  const upFw=()=>caps.forEach((c,i)=>fw[i].set(0,0,-1).applyQuaternion(c.qa));upFw();
+  for(const [ri,w] of [512,512,1024,1024].entries()){
+    status(.02+.07*ri/4,`Aligning photos ${ri+1}/4`);await tick();
+    const h=w/2,rt=new THREE.WebGLRenderTarget(w,h),L=[],Al=[],buf=new Uint8Array(w*h*4);photoMat.blending=THREE.NoBlending;
+    for(let i=0;i<n;i++){setPhoto(caps[i],caps[i].thumbTex,1,1);renderer.setRenderTarget(rt);renderer.clear();pass(photoMat,rt);renderer.readRenderTargetPixels(rt,0,0,w,h,buf);
+      const l=new Uint8Array(w*h),a=new Uint8Array(w*h);for(let p=0;p<w*h;p++){const o=p*4;l[p]=(buf[o]*77+buf[o+1]*150+buf[o+2]*29)>>8;a[p]=buf[o+3]}L.push(l);Al.push(a)}
+    rt.dispose();const sx=new Float64Array(n*3),sc=new Float64Array(n);
+    for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){
+      if(fw[i].dot(fw[j])<.17)continue; // viewing directions >80° apart: no overlap
+      const li=L[i],lj=L[j],ai=Al[i],aj=Al[j],cand=[];
+      for(let y=Math.round(h*.11)+P+SR;y<h*.89-P-SR;y+=P*2)for(let x=P+SR;x<w-P-SR;x+=P*2){const k=y*w+x;if(ai[k]>140&&aj[k]>140)cand.push(k)}
+      const step=Math.max(1,Math.ceil(cand.length/16));
+      for(let ci=0;ci<cand.length;ci+=step){const k=cand[ci],cx=k%w,cy=(k/w)|0;
+        let m=0,N=0;for(let v=-P;v<P;v++)for(let u=-P;u<P;u++){m+=li[(cy+v)*w+cx+u];N++}m/=N;
+        const T=new Float32Array(N);let vt=0;for(let v=-P,q=0;v<P;v++)for(let u=-P;u<P;u++,q++){const d=li[(cy+v)*w+cx+u]-m;T[q]=d;vt+=d*d}
+        if(vt/N<80)continue; // too flat to match
+        let best=-1,bx=0,by=0;
+        for(let dy=-SR;dy<=SR;dy++)for(let dx=-SR;dx<=SR;dx++){let sj=0,sjj=0,sij=0,q=0,bad=false;
+          for(let v=-P;v<P;v++){const r=(cy+dy+v)*w+cx+dx;for(let u=-P;u<P;u++,q++){const p=r+u;if(aj[p]<60){bad=true;break}const lv=lj[p];sj+=lv;sjj+=lv*lv;sij+=T[q]*lv}if(bad)break}
+          if(bad)continue;const vj=sjj-sj*sj/N;if(vj<1)continue;const ncc=sij/Math.sqrt(vt*vj);if(ncc>best){best=ncc;bx=dx;by=dy}}
+        if(best<.85||Math.abs(bx)===SR||Math.abs(by)===SR)continue;
+        // feature sits at direction A in photo i's render and at B in photo j's render. Rotation B->A (axis B x A):
+        eqDir(w,h,cx,cy,A);eqDir(w,h,cx+bx,cy+by,B);X.crossVectors(B,A);const s=X.length();if(s<1e-6)continue;
+        X.multiplyScalar(Math.asin(Math.min(1,s))/s);if(X.length()>.1)continue; // reject >5.7° outliers
+        sx[j*3]+=X.x*best*.5;sx[j*3+1]+=X.y*best*.5;sx[j*3+2]+=X.z*best*.5;sx[i*3]-=X.x*best*.5;sx[i*3+1]-=X.y*best*.5;sx[i*3+2]-=X.z*best*.5;sc[i]+=best;sc[j]+=best}}
+    for(let i=0;i<n;i++){if(sc[i]<2)continue;X.set(sx[i*3],sx[i*3+1],sx[i*3+2]).multiplyScalar(1.6/sc[i]);const a=X.length();if(a<1e-6)continue;
+      caps[i].qa.premultiply(dq.setFromAxisAngle(X.divideScalar(a),Math.min(a,.07)))} // world-frame correction: q' = R * q
+    upFw()}
+}
+function status(p,t){$('sbar').style.width=(p*100)+'%';$('stxt').textContent=t}
+async function stitch(){
+  show('proc');if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}try{wake&&wake.release()}catch(e){}
+  await tick();const n=caps.length,W=S.outW,H=W/2;outW=W;outH=H;
+  renderer.autoClear=false;renderer.setClearColor(0,0);
+  caps.forEach(c=>c.qa=(S.snap?quatForDir(dots[c.idx].dir):c.q).clone());if(S.align&&n>1)await align();
+  // --- 6a. per-photo exposure matching: low-res single-photo maps, mean luminance in pairwise overlaps -> gains
+  status(.02,'Matching exposure');
+  const SW=256,SH=128,low=new THREE.WebGLRenderTarget(SW,SH),maps=[];photoMat.blending=THREE.NoBlending;
+  for(let i=0;i<n;i++){setPhoto(caps[i],caps[i].thumbTex,1,1);renderer.setRenderTarget(low);renderer.clear();pass(photoMat,low);
+    const b=new Uint8Array(SW*SH*4);renderer.readRenderTargetPixels(low,0,0,SW,SH,b);maps.push(b)}
+  low.dispose();
+  const sum=new Float64Array(n*n),cnt=new Float64Array(n*n),ix=[],lm=[];
+  for(let p=0;p<SW*SH;p++){ix.length=0;lm.length=0;
+    for(let i=0;i<n;i++){const o=p*4,b=maps[i];if(b[o+3]>50){ix.push(i);lm.push(.2126*LUT[b[o]]+.7152*LUT[b[o+1]]+.0722*LUT[b[o+2]])}}
+    for(let a=0;a<ix.length;a++)for(let c=0;c<ix.length;c++)if(a!==c){sum[ix[a]*n+ix[c]]+=lm[a];cnt[ix[a]*n+ix[c]]++}}
+  let g=new Float64Array(n).fill(1);
+  for(let it=0;it<30;it++){const ng=new Float64Array(n);
+    for(let i=0;i<n;i++){let a=0,b=0;for(let j=0;j<n;j++){const c=cnt[i*n+j];if(c<50)continue;const Aij=sum[i*n+j]/c,Aji=sum[j*n+i]/c;if(Aij<1e-4||Aji<1e-4)continue;a+=c*g[j]*Aji/Aij;b+=c}
+      ng[i]=b?a/b:g[i]}
+    let ml=0;for(let i=0;i<n;i++)ml+=Math.log(ng[i]);ml=Math.exp(ml/n);for(let i=0;i<n;i++)g[i]=Math.min(2,Math.max(.5,ng[i]/ml))}
+  // --- 6b. weighted additive accumulation, one pass per photo
+  const acc=new THREE.WebGLRenderTarget(W,H,HF),prev=new THREE.WebGLRenderTarget(512,256);
+  renderer.setRenderTarget(acc);renderer.clear();renderer.setRenderTarget(null);
+  photoMat.blending=THREE.CustomBlending;photoMat.blendEquation=THREE.AddEquation;photoMat.blendSrc=THREE.OneFactor;photoMat.blendDst=THREE.OneFactor;
+  const pc=$('pv').getContext('2d');finMat.uniforms.acc.value=acc.texture;
+  for(let i=0;i<n;i++){
+    status(.1+.8*i/n,`Photo ${i+1} of ${n}`);await tick();
+    const bmp=await createImageBitmap(caps[i].blob),cv=document.createElement('canvas');cv.width=bmp.width;cv.height=bmp.height;cv.getContext('2d').drawImage(bmp,0,0);bmp.close();
+    const tex=new THREE.CanvasTexture(cv);tex.minFilter=THREE.LinearFilter;tex.generateMipmaps=false;
+    setPhoto(caps[i],tex,0,g[i]);pass(photoMat,acc);tex.dispose();cv.width=cv.height=0;
+    finMat.uniforms.fill.value=0;pass(finMat,prev);pc.putImageData(rtToImageData(prev,512,256),0,0)} // live low-res preview
+  // --- 6c. hole filling pyramid + final divide
+  status(.92,'Filling gaps');await tick();
+  const lv=[];let w=W,h=H,src=acc;
+  while(w>32){w>>=1;h>>=1;const t=new THREE.WebGLRenderTarget(w,h,HF);copyMat.uniforms.map.value=src.texture;pass(copyMat,t);lv.push(t);src=t}
+  const pick=k=>lv[Math.max(0,lv.length-k)].texture; // coarse levels: ~W/64, ~W/128, 32x16
+  finMat.uniforms.f1.value=lv[Math.min(lv.length-1,3)].texture;finMat.uniforms.f2.value=lv[Math.min(lv.length-1,5)].texture;finMat.uniforms.f3.value=lv[lv.length-1].texture;finMat.uniforms.fill.value=1;
+  if(outRT)outRT.dispose();outRT=new THREE.WebGLRenderTarget(W,H,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,depthBuffer:false,generateMipmaps:false});
+  pass(finMat,outRT);acc.dispose();prev.dispose();lv.forEach(t=>t.dispose());
+  renderer.autoClear=true;status(1,'Done');openResult()}
+
+/* ============ 7. RESULT VIEWER ============ */
+const vScene=new THREE.Scene(),vCam=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.1,100);vCam.rotation.order='YXZ';
+const vMat=new THREE.ShaderMaterial({side:THREE.BackSide,uniforms:{map:{value:null}},
+  vertexShader:'varying vec3 vD;void main(){vD=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+  fragmentShader:'varying vec3 vD;uniform sampler2D map;void main(){vec3 d=normalize(vD);vec2 uv=vec2(atan(d.x,-d.z)/6.2831853+.5,asin(d.y)/3.1415927+.5);gl_FragColor=vec4(texture2D(map,uv).rgb,1.);}'}); // same lon/lat convention as the stitcher
+vScene.add(new THREE.Mesh(new THREE.SphereGeometry(10,64,32),vMat));
+function openResult(){vMat.uniforms.map.value=outRT.texture;vCam.rotation.set(0,0,0);show('res')}
+let drag=null;
+glc.addEventListener('touchstart',e=>{if(state==='res'&&e.touches.length===1)drag=[e.touches[0].clientX,e.touches[0].clientY]},{passive:true});
+glc.addEventListener('touchmove',e=>{if(!drag||state!=='res')return;const t=e.touches[0],k=vCam.fov*D2R/innerHeight;
+  vCam.rotation.y+=(t.clientX-drag[0])*k;vCam.rotation.x=Math.max(-1.5,Math.min(1.5,vCam.rotation.x+(t.clientY-drag[1])*k));drag=[t.clientX,t.clientY]},{passive:true});
+glc.addEventListener('touchend',()=>drag=null);
+$('res').addEventListener('touchstart',e=>{if(e.target===$('res')&&e.touches.length===1)drag=[e.touches[0].clientX,e.touches[0].clientY]},{passive:true});
+$('res').addEventListener('touchmove',e=>{if(e.target===$('res'))glc.dispatchEvent(new TouchEvent('touchmove',{touches:e.touches}))},{passive:true});
+
+/* ============ 8. EXPORT ============ */
+function dl(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
+function eqBlob(type){const c=document.createElement('canvas');c.width=outW;c.height=outH;c.getContext('2d').putImageData(rtToImageData(outRT,outW,outH),0,0);
+  return new Promise(r=>c.toBlob(r,type,.95))}
+// Radiance RGBE: sRGB -> linear, then expand the brightest (clipped) pixels by up to (1+boost) so lights act as light sources.
+function hdrBlob(boost){
+  const W=outW,H=outH,b=new Uint8Array(W*H*4);renderer.readRenderTargetPixels(outRT,0,0,W,H,b);
+  const head=new TextEncoder().encode(`#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y ${H} +X ${W}\n`),out=new Uint8Array(head.length+W*H*4);out.set(head);let o=head.length;
+  for(let y=0;y<H;y++){let p=(H-1-y)*W*4;
+    for(let x=0;x<W;x++,p+=4){const r=b[p],g=b[p+1],bl=b[p+2];let t=(Math.max(r,g,bl)/255-.8)/.2;t=t<0?0:t>1?1:t;t=t*t*(3-2*t);
+      const k=1+boost*t*t,R=LUT[r]*k,G=LUT[g]*k,B=LUT[bl]*k,m=Math.max(R,G,B);
+      if(m<1e-32){o+=4;continue}
+      const e=Math.floor(Math.log2(m))+1,s=256/Math.pow(2,e);out[o++]=R*s;out[o++]=G*s;out[o++]=B*s;out[o++]=e+128}}
+  return new Blob([out],{type:'application/octet-stream'})}
+$('dJpg').onclick=async()=>dl(await eqBlob('image/jpeg'),'freehdri.jpg');
+$('dPng').onclick=async()=>dl(await eqBlob('image/png'),'freehdri.png');
+$('dHdr').onclick=()=>dl(hdrBlob(+$('hb').value),'freehdri.hdr');
+$('hb').oninput=e=>$('hbv').textContent=e.target.value+'×';
+$('dShare').onclick=async()=>{try{
+  const files=[new File([await eqBlob('image/jpeg')],'freehdri.jpg',{type:'image/jpeg'}),new File([hdrBlob(+$('hb').value)],'freehdri.hdr',{type:'application/octet-stream'})];
+  if(navigator.canShare&&navigator.canShare({files}))await navigator.share({files,title:'FreeHDRI'});
+  else await navigator.share({files:[files[0]],title:'FreeHDRI'})}catch(e){}};
+$('again').onclick=()=>{show('start')};
+
+/* ============ 9. UI WIRING ============ */
+$('btnStart').onclick=async()=>{ $('err').textContent='';
+  try{await askMotion();await askCamera();await waitEv();await askWake();setReference();startCapture()}
+  catch(e){$('err').textContent=errText(e)}};
+$('btnUndo').onclick=undo;$('btnSkip').onclick=skip;$('btnFinish').onclick=()=>{if(caps.length&&!busy)stitch()};
+const openSheet=()=>$('sheet').classList.add('on');$('btnSet0').onclick=$('btnSet1').onclick=openSheet;$('sheetClose').onclick=()=>$('sheet').classList.remove('on');
+$('fov').oninput=e=>{S.fov=+e.target.value;$('fovv').textContent=S.fov+'°'};
+$('hold').oninput=e=>{S.hold=+e.target.value;$('holdv').textContent=S.hold+' ms'};
+$('qual').onchange=e=>S.maxSide=+e.target.value;$('outw').onchange=e=>S.outW=+e.target.value;$('snap').onchange=e=>S.snap=e.target.checked;$('align').onchange=e=>S.align=e.target.checked;
+$('preset').onchange=e=>{S.preset=e.target.value;if(state==='cap'&&!caps.length){buildDots();updateProg()}};
+addEventListener('resize',resize);resize();
+(function loop(t){requestAnimationFrame(loop);if(state==='cap')capFrame(t);else if(state==='res')renderer.render(vScene,vCam)})(0);
+</script>
+</body>
+</html>
