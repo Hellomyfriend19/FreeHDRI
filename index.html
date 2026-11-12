@@ -82,6 +82,8 @@ button.pri{background:var(--acc)}button:active{opacity:.7}button:disabled{opacit
       <label style="display:flex;justify-content:space-between;margin:12px 0 2px;font-size:14px">Highlight boost <span id="hbv">10×</span></label>
       <input id="hb" type="range" min="0" max="60" value="10" style="width:100%">
       <p class="small" style="margin-top:8px">Browsers can't lock exposure or bracket exposures, so the .hdr is a linearized, tone-expanded single-exposure panorama. It is good for believable lighting and reflections, but not a true multi-exposure HDR.</p>
+      <p class="small" style="margin-top:10px">Ghosting left? Download the JPG, give it to Gemini or ChatGPT with the prompt below, then import the result to export the .hdr from it.</p>
+      <div class="row" style="margin-top:6px"><button id="aiCopy">Copy AI fix prompt</button><button id="aiImp">Import fixed image</button></div><input id="aiFile" type="file" accept="image/*" hidden>
       <div class="row" style="margin-top:10px"><button id="again">Capture again</button></div>
     </div>
   </div>
@@ -241,24 +243,28 @@ const GLSL_SRGB='vec3 s2l(vec3 c){return mix(c/12.92,pow((c+.055)/1.055,vec3(2.4
 // Per photo: for every output pixel build the 3D direction from lon/lat, rotate it into the photo's camera space with
 // inverse(q), project with FOV/aspect, sample if inside the frame. Output = (linear color*gain*w, w) so additive blending accumulates.
 const photoMat=new THREE.ShaderMaterial({depthTest:false,depthWrite:false,vertexShader:VS,
-  uniforms:{map:{value:null},m:{value:new THREE.Matrix3()},tf:{value:1},asp:{value:1},gain:{value:1},raw:{value:0}},
-  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D map;uniform mat3 m;uniform float tf,asp,gain,raw;'+GLSL_SRGB+
+  uniforms:{map:{value:null},m:{value:new THREE.Matrix3()},tf:{value:1},asp:{value:1},gain:{value:1},raw:{value:0},band:{value:0}},
+  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D map;uniform mat3 m;uniform float tf,asp,gain,raw,band;'+GLSL_SRGB+
   `void main(){float lon=(vUv.x-.5)*6.2831853,lat=(vUv.y-.5)*3.1415927;
    vec3 d=vec3(sin(lon)*cos(lat),sin(lat),-cos(lon)*cos(lat));vec3 p=m*d;
    if(p.z>-1e-3){gl_FragColor=vec4(0.);return;}
    vec2 n=vec2(p.x/(-p.z)/(tf*asp),p.y/(-p.z)/tf);vec2 e=1.-abs(n);
    if(e.x<=0.||e.y<=0.){gl_FragColor=vec4(0.);return;}
    float w=smoothstep(0.,.3,e.x)*smoothstep(0.,.3,e.y);
-   float w2=pow(smoothstep(0.,1.,e.x)*smoothstep(0.,1.,e.y),3.)+.002; // sharp falloff: the photo nearest its own centre dominates, so ghosts only show in a narrow seam
+   float w2=pow(smoothstep(0.,1.,e.x)*smoothstep(0.,1.,e.y),2.)+.002; // sharp falloff: the photo nearest its own centre dominates, so ghosts only show in a narrow seam
    vec3 c=texture2D(map,n*.5+.5).rgb;
-   gl_FragColor=raw>.5?vec4(c,w):vec4(s2l(c)*gain*w2,w2);}`});
+   if(raw>.5){gl_FragColor=vec4(c,w);return;}
+   // two-band blend: LOW band (blurred mip) is averaged over the whole overlap with soft weights -> no visible exposure/colour seams;
+   // HIGH band (detail) uses sharp weights so one photo supplies the detail -> no doubled edges.
+   vec3 lo=s2l(texture2D(map,n*.5+.5,5.).rgb)*gain,hi=s2l(c)*gain-lo;float wl=e.x*e.y+.002;
+   gl_FragColor=band>.5?vec4(hi*w2,w2):vec4(lo*wl,wl);}`});
 const copyMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{map:{value:null}},
   fragmentShader:'varying vec2 vUv;uniform sampler2D map;void main(){gl_FragColor=texture2D(map,vUv);}'});
 // Final: divide by weight; fill holes from blurred coarse levels (pyramid of exact 2x2 box averages of the premultiplied accumulation).
-const finMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{acc:{value:null},f1:{value:null},f2:{value:null},f3:{value:null},fill:{value:1}},
-  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D acc,f1,f2,f3;uniform float fill;'+GLSL_SRGB+
+const finMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{acc:{value:null},accH:{value:null},f1:{value:null},f2:{value:null},f3:{value:null},fill:{value:1}},
+  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D acc,accH,f1,f2,f3;uniform float fill;'+GLSL_SRGB+
   `vec3 lv(sampler2D t,out float ok){vec4 c=texture2D(t,vUv);ok=step(.01,c.a);return c.rgb/max(c.a,1e-4);}
-   void main(){vec4 a=texture2D(acc,vUv);vec3 col=a.rgb/max(a.a,1e-5);vec3 bg=vec3(.08);
+   void main(){vec4 a=texture2D(acc,vUv),b=texture2D(accH,vUv);vec3 col=a.rgb/max(a.a,1e-5)+b.rgb/max(b.a,1e-5);vec3 bg=vec3(.08);
    if(fill>.5){float o1,o2,o3;vec3 c1=lv(f1,o1),c2=lv(f2,o2),c3=lv(f3,o3);bg=o1>.5?c1:o2>.5?c2:o3>.5?c3:vec3(.05);}
    float t=smoothstep(0.,.0015,a.a);gl_FragColor=vec4(l2s(mix(bg,col,t)),1.);}`});
 function pass(mat,rt){uQuad.material=mat;renderer.setRenderTarget(rt);renderer.render(uScene,uCam);renderer.setRenderTarget(null)}
@@ -329,15 +335,15 @@ async function stitch(){
       ng[i]=b?a/b:g[i]}
     let ml=0;for(let i=0;i<n;i++)ml+=Math.log(ng[i]);ml=Math.exp(ml/n);for(let i=0;i<n;i++)g[i]=Math.min(2,Math.max(.5,ng[i]/ml))}
   // --- 6b. weighted additive accumulation, one pass per photo
-  const acc=new THREE.WebGLRenderTarget(W,H,HF),prev=new THREE.WebGLRenderTarget(512,256);
-  renderer.setRenderTarget(acc);renderer.clear();renderer.setRenderTarget(null);
+  const acc=new THREE.WebGLRenderTarget(W,H,HF),accH=new THREE.WebGLRenderTarget(W,H,HF),prev=new THREE.WebGLRenderTarget(512,256);
+  renderer.setRenderTarget(acc);renderer.clear();renderer.setRenderTarget(accH);renderer.clear();renderer.setRenderTarget(null);
   photoMat.blending=THREE.CustomBlending;photoMat.blendEquation=THREE.AddEquation;photoMat.blendSrc=THREE.OneFactor;photoMat.blendDst=THREE.OneFactor;
-  const pc=$('pv').getContext('2d');finMat.uniforms.acc.value=acc.texture;
+  const pc=$('pv').getContext('2d');finMat.uniforms.acc.value=acc.texture;finMat.uniforms.accH.value=accH.texture;
   for(let i=0;i<n;i++){
     status(.1+.8*i/n,`Photo ${i+1} of ${n}`);await tick();
     const bmp=await createImageBitmap(caps[i].blob),cv=document.createElement('canvas');cv.width=bmp.width;cv.height=bmp.height;cv.getContext('2d').drawImage(bmp,0,0);bmp.close();
-    const tex=new THREE.CanvasTexture(cv);tex.minFilter=THREE.LinearFilter;tex.generateMipmaps=false;
-    setPhoto(caps[i],tex,0,g[i]);pass(photoMat,acc);tex.dispose();cv.width=cv.height=0;
+    const tex=new THREE.CanvasTexture(cv);tex.minFilter=THREE.LinearMipmapLinearFilter;tex.generateMipmaps=true;
+    setPhoto(caps[i],tex,0,g[i]);photoMat.uniforms.band.value=0;pass(photoMat,acc);photoMat.uniforms.band.value=1;pass(photoMat,accH);tex.dispose();cv.width=cv.height=0;
     finMat.uniforms.fill.value=0;pass(finMat,prev);pc.putImageData(rtToImageData(prev,512,256),0,0)} // live low-res preview
   // --- 6c. hole filling pyramid + final divide
   status(.92,'Filling gaps');await tick();
@@ -346,7 +352,7 @@ async function stitch(){
   const pick=k=>lv[Math.max(0,lv.length-k)].texture; // coarse levels: ~W/64, ~W/128, 32x16
   finMat.uniforms.f1.value=lv[Math.min(lv.length-1,3)].texture;finMat.uniforms.f2.value=lv[Math.min(lv.length-1,5)].texture;finMat.uniforms.f3.value=lv[lv.length-1].texture;finMat.uniforms.fill.value=1;
   if(outRT)outRT.dispose();outRT=new THREE.WebGLRenderTarget(W,H,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,depthBuffer:false,generateMipmaps:false});
-  pass(finMat,outRT);acc.dispose();prev.dispose();lv.forEach(t=>t.dispose());
+  pass(finMat,outRT);acc.dispose();accH.dispose();prev.dispose();lv.forEach(t=>t.dispose());
   renderer.autoClear=true;status(1,'Done');openResult()}
 
 /* ============ 7. RESULT VIEWER ============ */
@@ -386,6 +392,14 @@ $('dShare').onclick=async()=>{try{
   const files=[new File([await eqBlob('image/jpeg')],'freehdri.jpg',{type:'image/jpeg'}),new File([hdrBlob(+$('hb').value)],'freehdri.hdr',{type:'application/octet-stream'})];
   if(navigator.canShare&&navigator.canShare({files}))await navigator.share({files,title:'FreeHDRI'});
   else await navigator.share({files:[files[0]],title:'FreeHDRI'})}catch(e){}};
+/* ---- AI cleanup: copy a prompt for Gemini/ChatGPT, then import the fixed image back (replaces the stitched result, so .hdr export uses it) ---- */
+const AI_PROMPT=`This is an equirectangular 360° panorama (2:1) stitched from many phone photos taken by turning on the spot. Fix stitching errors only: remove ghosting and doubled or duplicated objects, repair edges and straight lines that break at seams, and smooth visible seams and brightness or color steps between neighboring photos. Where two copies of the same object overlap, keep one clean, sharp copy. Fill any black, gray or blank gaps (usually at the bottom) with plausible matching ground texture.
+Strict rules: return a single image with exactly the same 2:1 aspect ratio and framing, at the highest resolution you can. No cropping, no borders, no text, no watermark, no added or removed real objects, no style change. Keep the same lighting, colors and perspective. The image is equirectangular, so the top and bottom are naturally stretched and the left and right edges must still wrap seamlessly. Do not "fix" that distortion.`;
+$('aiCopy').onclick=async()=>{const b=$('aiCopy');try{await navigator.clipboard.writeText(AI_PROMPT);b.textContent='Copied ✓';setTimeout(()=>b.textContent='Copy AI fix prompt',1800)}catch(e){prompt('Copy this prompt:',AI_PROMPT)}};
+$('aiImp').onclick=()=>$('aiFile').click();
+$('aiFile').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;
+  const bmp=await createImageBitmap(f),c=document.createElement('canvas');c.width=outW;c.height=outH;c.getContext('2d').drawImage(bmp,0,0,outW,outH);bmp.close(); // stretched to 2:1 if the AI changed the ratio
+  const tex=new THREE.CanvasTexture(c);tex.minFilter=THREE.LinearFilter;tex.generateMipmaps=false;copyMat.uniforms.map.value=tex;pass(copyMat,outRT);tex.dispose()};
 $('again').onclick=()=>{show('start')};
 
 /* ============ 9. UI WIRING ============ */
