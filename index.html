@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="FreeHDRI">
+<link rel="manifest" href='data:application/manifest+json,{"name":"FreeHDRI","short_name":"FreeHDRI","display":"standalone","orientation":"portrait","background_color":"#000000","theme_color":"#000000","start_url":"."}'>
 <title>FreeHDRI</title>
 <!-- Must be served over HTTPS (camera + motion sensors require it). GitHub Pages or Netlify work for free. -->
 <style>
@@ -51,6 +53,7 @@ button.pri{background:var(--acc)}button:active{opacity:.7}button:disabled{opacit
   <p style="max-width:300px">Stand in one spot. Turn your body, not just your arms. Hold the phone close to your chest and aim at each dot. Start with the phone held upright.</p>
   <p class="small" style="max-width:300px">Motion: to know which way you're pointing.<br>Camera: to photograph your surroundings.</p>
   <button class="pri" id="btnStart">Start</button>
+  <button id="btnResume" style="display:none"></button>
   <div id="err" class="err"></div>
   <button id="btnSet0">Settings</button>
 </div>
@@ -79,9 +82,13 @@ button.pri{background:var(--acc)}button:active{opacity:.7}button:disabled{opacit
       <div class="row">
         <button class="pri" id="dJpg">JPG</button><button id="dPng">PNG</button><button class="pri" id="dHdr">.hdr</button><button id="dShare">Share</button>
       </div>
-      <label style="display:flex;justify-content:space-between;margin:12px 0 2px;font-size:14px">Highlight boost <span id="hbv">10×</span></label>
-      <input id="hb" type="range" min="0" max="60" value="10" style="width:100%">
+      <label style="display:flex;justify-content:space-between;margin:12px 0 2px;font-size:14px">Highlight boost <span id="hbv">4×</span></label>
+      <input id="hb" type="range" min="0" max="60" value="4" style="width:100%">
       <p class="small" style="margin-top:8px">Browsers can't lock exposure or bracket exposures, so the .hdr is a linearized, tone-expanded single-exposure panorama. It is good for believable lighting and reflections, but not a true multi-exposure HDR.</p>
+      <label style="display:flex;justify-content:space-between;margin:10px 0 2px;font-size:14px">Light strength (sun / lamps) <span id="lsv">3</span></label><input id="ls" type="range" min="0" max="20" step=".5" value="3" style="width:100%">
+      <label style="display:flex;justify-content:space-between;margin:10px 0 2px;font-size:14px">Exposure (EV) <span id="evv">0</span></label><input id="ev" type="range" min="-3" max="3" step=".25" value="0" style="width:100%">
+      <p class="small">Light strength finds clipped bright blobs (sun, windows, lamps) and gives them real radiance for Blender. Set 0 to disable.</p>
+      <p id="warn" class="small" style="color:#ff9f0a;margin-top:8px"></p>
       <p class="small" style="margin-top:10px">Ghosting left? Download the JPG, give it to Gemini or ChatGPT with the prompt below, then import the result to export the .hdr from it.</p>
       <div class="row" style="margin-top:6px"><button id="aiCopy">Copy AI fix prompt</button><button id="aiImp">Import fixed image</button></div><input id="aiFile" type="file" accept="image/*" hidden>
       <div class="row" style="margin-top:10px"><button id="again">Capture again</button></div>
@@ -97,6 +104,7 @@ button.pri{background:var(--acc)}button:active{opacity:.7}button:disabled{opacit
   <label>Photo quality <select id="qual"><option value="2048">Fast 2K</option><option value="4096" selected>Good 4K</option></select></label>
   <label>Output resolution <select id="outw"><option value="4096" selected>4096 × 2048</option><option value="2048">2048 × 1024</option></select></label>
   <label>Auto-align photos <input id="align" type="checkbox" checked></label>
+  <label>Vignette fix <span id="vigv">0.20</span></label><input id="vig" type="range" min="0" max=".6" step=".02" value=".2">
   <label>Snap to dot grid <input id="snap" type="checkbox"></label>
   <p class="small" style="margin-top:12px">Snap uses each dot's ideal direction instead of the measured rotation. Use it if measured rotations look noisy. Layout changes apply when no photos are captured yet.</p>
   <div class="row" style="margin-top:16px"><button class="pri" id="sheetClose">Done</button></div>
@@ -113,7 +121,7 @@ const PRESETS={
   std:[{e:0,n:12},{e:35,n:10},{e:-35,n:10},{e:65,n:6},{e:-65,n:6},{e:90,n:1},{e:-90,n:1}],
   high:[{e:0,n:16},{e:30,n:14},{e:-30,n:14},{e:58,n:10},{e:-58,n:10},{e:80,n:5},{e:-80,n:5},{e:90,n:1},{e:-90,n:1}]
 };
-const S={align:true,fov:63,hold:1000,outW:4096,maxSide:4096,snap:false,preset:'std'};
+const S={align:true,vig:.2,fov:63,hold:1000,outW:4096,maxSide:4096,snap:false,preset:'std'};
 const R=10, D2R=Math.PI/180, HIT_DEG=3, MAX_SPEED=15; // capture when within 3° and slower than 15°/s
 const $=id=>document.getElementById(id), V3=THREE.Vector3, Q=THREE.Quaternion;
 const LUT=new Float32Array(256).map((_,i)=>{const c=i/255;return c<=.04045?c/12.92:Math.pow((c+.055)/1.055,2.4)});
@@ -190,14 +198,18 @@ const pinMat=()=>new THREE.ShaderMaterial({transparent:true,depthTest:false,dept
   vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
   fragmentShader:'varying vec2 vUv;uniform sampler2D map;uniform float op;void main(){vec2 d=min(vUv,1.-vUv);float a=smoothstep(0.,.12,d.x)*smoothstep(0.,.12,d.y);gl_FragColor=vec4(texture2D(map,vUv).rgb,a*op);}'});
 function doneCount(){return dots.filter(d=>d.done).length}
-function updateProg(){const n=doneCount();$('prog').textContent=n+' / '+dots.length;$('pbar').style.width=(100*n/dots.length)+'%';$('btnUndo').disabled=!hist.length;$('btnFinish').disabled=!caps.length}
-function startCapture(){
+function updateProg(){persist();const n=doneCount();$('prog').textContent=n+' / '+dots.length;$('pbar').style.width=(100*n/dots.length)+'%';$('btnUndo').disabled=!hist.length;$('btnFinish').disabled=!caps.length}
+function startCapture(){DB.clear().catch(()=>{});
   buildDots();caps.forEach(c=>{capScene.remove(c.group);c.thumbTex.dispose()});caps=[];hist=[];
   target=-1;holdT0=null;busy=false;updateProg();show('cap');lastT=performance.now()}
+// Sharpest-frame capture: during the hold, score every frame (gradient energy on a 160px copy) and keep the sharpest one + its rotation.
+const scc=document.createElement('canvas'),sctx=scc.getContext('2d',{willReadFrequently:true}),bestC=document.createElement('canvas'),best={s:0,ok:false,q:new Q()};
+function sharp(){const w=160,h=Math.round(160*video.videoHeight/video.videoWidth);scc.width=w;scc.height=h;sctx.drawImage(video,0,0,w,h);const d=sctx.getImageData(0,0,w,h).data;let s=0;
+  for(let y=1;y<h;y++)for(let x=1;x<w;x++){const o=(y*w+x)*4,a=d[o+1],bx=d[o-3],by=d[o-w*4+1];s+=(a-bx)*(a-bx)+(a-by)*(a-by)}return s/(w*h)}
+function grab(c){const vw=video.videoWidth,vh=video.videoHeight,sc=Math.min(1,S.maxSide/Math.max(vw,vh));c.width=Math.round(vw*sc);c.height=Math.round(vh*sc);c.getContext('2d').drawImage(video,0,0,c.width,c.height)}
 async function capture(i){
-  busy=true;const dq=relQ.clone(); // rotation snapshot at the moment of the frame grab
-  const vw=video.videoWidth,vh=video.videoHeight,sc=Math.min(1,S.maxSide/Math.max(vw,vh));
-  const c=document.createElement('canvas');c.width=Math.round(vw*sc);c.height=Math.round(vh*sc);c.getContext('2d').drawImage(video,0,0,c.width,c.height);
+  busy=true;if(!best.ok){grab(bestC);best.q.copy(relQ)}
+  const dq=best.q.clone(),c=bestC; // sharpest frame of the hold + the rotation at that frame
   const tc=document.createElement('canvas');tc.width=512;tc.height=Math.round(512*c.height/c.width);tc.getContext('2d').drawImage(c,0,0,tc.width,tc.height);
   navigator.vibrate&&navigator.vibrate(30);$('flash').style.opacity=.7;setTimeout(()=>$('flash').style.opacity=0,80);
   const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',.92)); // store as JPEG blob, not raw pixels (memory safety)
@@ -222,7 +234,7 @@ function capFrame(t){
   let p=0;
   if(target>=0&&!busy){
     const err=Math.acos(Math.min(1,dots[target].dir.dot(_f)))/D2R;
-    if(err<HIT_DEG&&speed<MAX_SPEED){if(holdT0===null)holdT0=t;p=Math.min(1,(t-holdT0)/S.hold);if(p>=1)capture(target)}else holdT0=null}
+    if(err<HIT_DEG&&speed<MAX_SPEED){if(holdT0===null){holdT0=t;best.s=0;best.ok=false}p=Math.min(1,(t-holdT0)/S.hold);const sh=sharp();if(sh>best.s){best.s=sh;best.ok=true;best.q.copy(relQ);grab(bestC)}if(p>=1)capture(target)}else holdT0=null}
   dots.forEach((d,i)=>{if(d.done)return;const s=i===target?.7+.15*Math.sin(t/180):.4;d.spr.scale.setScalar(i===target?s*(1-p*.8):s)});
   $('retp').setAttribute('stroke-dasharray',(189*p)+' 189');
   arrow();
@@ -243,8 +255,8 @@ const GLSL_SRGB='vec3 s2l(vec3 c){return mix(c/12.92,pow((c+.055)/1.055,vec3(2.4
 // Per photo: for every output pixel build the 3D direction from lon/lat, rotate it into the photo's camera space with
 // inverse(q), project with FOV/aspect, sample if inside the frame. Output = (linear color*gain*w, w) so additive blending accumulates.
 const photoMat=new THREE.ShaderMaterial({depthTest:false,depthWrite:false,vertexShader:VS,
-  uniforms:{map:{value:null},m:{value:new THREE.Matrix3()},tf:{value:1},asp:{value:1},gain:{value:1},raw:{value:0},band:{value:0}},
-  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D map;uniform mat3 m;uniform float tf,asp,gain,raw,band;'+GLSL_SRGB+
+  uniforms:{map:{value:null},m:{value:new THREE.Matrix3()},tf:{value:1},asp:{value:1},gain:{value:new THREE.Vector3(1,1,1)},raw:{value:0},band:{value:0},vig:{value:0}},
+  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D map;uniform mat3 m;uniform vec3 gain;uniform float tf,asp,raw,band,vig;'+GLSL_SRGB+
   `void main(){float lon=(vUv.x-.5)*6.2831853,lat=(vUv.y-.5)*3.1415927;
    vec3 d=vec3(sin(lon)*cos(lat),sin(lat),-cos(lon)*cos(lat));vec3 p=m*d;
    if(p.z>-1e-3){gl_FragColor=vec4(0.);return;}
@@ -256,61 +268,75 @@ const photoMat=new THREE.ShaderMaterial({depthTest:false,depthWrite:false,vertex
    if(raw>.5){gl_FragColor=vec4(c,w);return;}
    // two-band blend: LOW band (blurred mip) is averaged over the whole overlap with soft weights -> no visible exposure/colour seams;
    // HIGH band (detail) uses sharp weights so one photo supplies the detail -> no doubled edges.
-   vec3 lo=s2l(texture2D(map,n*.5+.5,5.).rgb)*gain,hi=s2l(c)*gain-lo;float wl=e.x*e.y+.002;
+   vec3 k=gain*(1.+vig*dot(n,n)); /* vignette fix */ vec3 lo=s2l(texture2D(map,n*.5+.5,5.).rgb)*k,hi=s2l(c)*k-lo;float wl=e.x*e.y+.002;
    gl_FragColor=band>.5?vec4(hi*w2,w2):vec4(lo*wl,wl);}`});
 const copyMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{map:{value:null}},
   fragmentShader:'varying vec2 vUv;uniform sampler2D map;void main(){gl_FragColor=texture2D(map,vUv);}'});
 // Final: divide by weight; fill holes from blurred coarse levels (pyramid of exact 2x2 box averages of the premultiplied accumulation).
-const finMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{acc:{value:null},accH:{value:null},f1:{value:null},f2:{value:null},f3:{value:null},fill:{value:1}},
-  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D acc,accH,f1,f2,f3;uniform float fill;'+GLSL_SRGB+
+const finMat=new THREE.ShaderMaterial({depthTest:false,vertexShader:VS,uniforms:{latB:{value:-9},latT:{value:9},acc:{value:null},accH:{value:null},f1:{value:null},f2:{value:null},f3:{value:null},fill:{value:1}},
+  fragmentShader:'precision highp float;varying vec2 vUv;uniform sampler2D acc,accH,f1,f2,f3;uniform float fill,latB,latT;'+GLSL_SRGB+
   `vec3 lv(sampler2D t,out float ok){vec4 c=texture2D(t,vUv);ok=step(.01,c.a);return c.rgb/max(c.a,1e-4);}
    void main(){vec4 a=texture2D(acc,vUv),b=texture2D(accH,vUv);vec3 col=a.rgb/max(a.a,1e-5)+b.rgb/max(b.a,1e-5);vec3 bg=vec3(.08);
    if(fill>.5){float o1,o2,o3;vec3 c1=lv(f1,o1),c2=lv(f2,o2),c3=lv(f3,o3);bg=o1>.5?c1:o2>.5?c2:o3>.5?c3:vec3(.05);}
-   float t=smoothstep(0.,.0015,a.a);gl_FragColor=vec4(l2s(mix(bg,col,t)),1.);}`});
+   float t=smoothstep(0.,.0015,a.a);
+   if(fill>.5&&a.a<.0015){float lat=(vUv.y-.5)*3.1415927;float lm=lat<latB?2.*latB-lat:(lat>latT?2.*latT-lat:lat);
+     if(lm!=lat){vec2 u2=vec2(fract(vUv.x+.5),clamp(lm/3.1415927+.5,0.,1.));vec4 a2=texture2D(acc,u2),b2=texture2D(accH,u2);
+       if(a2.a>.0015){col=a2.rgb/a2.a+b2.rgb/max(b2.a,1e-5);t=1.;}}} // mirror-clone pole holes from just inside the covered area
+   gl_FragColor=vec4(l2s(mix(bg,col,t)),1.);}`});
 function pass(mat,rt){uQuad.material=mat;renderer.setRenderTarget(rt);renderer.render(uScene,uCam);renderer.setRenderTarget(null)}
 const HF={type:THREE.HalfFloatType,minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,depthBuffer:false,generateMipmaps:false};
 const m4=new THREE.Matrix4(),tick=()=>new Promise(r=>setTimeout(r,0));
 let outRT=null,outW=0,outH=0;
 function quatFor(c){return c.qa} // refined rotation (set at the start of stitch())
 function setPhoto(c,tex,raw,gain){const u=photoMat.uniforms;u.map.value=tex;m4.makeRotationFromQuaternion(quatFor(c).clone().invert());u.m.value.setFromMatrix4(m4);
-  u.tf.value=Math.tan(S.fov*D2R/2);u.asp.value=c.asp;u.gain.value=gain;u.raw.value=raw}
+  u.tf.value=Math.tan(S.fov*D2R/2);u.asp.value=c.asp;const gv=typeof gain==='number'?[gain,gain,gain]:gain;u.gain.value.set(gv[0],gv[1],gv[2]);u.vig.value=S.vig;u.raw.value=raw}
 function rtToImageData(rt,w,h){const b=new Uint8Array(w*h*4),o=new Uint8ClampedArray(w*h*4);renderer.readRenderTargetPixels(rt,0,0,w,h,b);
   for(let y=0;y<h;y++)o.set(b.subarray((h-1-y)*w*4,(h-y)*w*4),y*w*4);return new ImageData(o,w,h)}
-/* ---- 6.0 ALIGNMENT: refine each photo's rotation by matching image patches inside overlaps.
-   Orientation sensors drift and hands wobble, so the measured quaternions are off by a few degrees -> doubled objects.
-   Each round: render every photo alone into a small equirect, run zero-mean normalized cross-correlation (ZNCC) block matching
-   between overlapping photo pairs, turn every match into a small world-space rotation (B->A) and nudge both photos by half of it.
-   Coarse-to-fine: 2 rounds at 512px, 2 rounds at 1024px. Parallax can't be fixed by rotation; the sharper blend weights below hide the rest. */
-const eqDir=(w,h,x,y,o)=>{const lon=((x+.5)/w-.5)*6.2831853,lat=((y+.5)/h-.5)*3.1415927,c=Math.cos(lat);return o.set(Math.sin(lon)*c,Math.sin(lat),-Math.cos(lon)*c)};
+/* ---- 6.0 ALIGNMENT: refine each photo's rotation (and the shared FOV) by matching image patches inside overlaps.
+   CPU matching (ZNCC block matching) runs in a Web Worker so the UI stays responsive. Rounds: 512,512 | FOV fit | 1024,1024. */
+function matchWork(d){ // runs inside the worker
+  const w=d.w,h=d.h,P=d.P,SR=d.SR,out=[];let tried=0;
+  const dir=(x,y)=>{const lon=((x+.5)/w-.5)*6.2831853,lat=((y+.5)/h-.5)*3.1415927,c=Math.cos(lat);return[Math.sin(lon)*c,Math.sin(lat),-Math.cos(lon)*c]};
+  for(const pr of d.pairs){const i=pr[0],j=pr[1],li=d.L[i],lj=d.L[j],ai=d.Al[i],aj=d.Al[j],cand=[];
+    for(let y=Math.round(h*.11)+P+SR;y<h*.89-P-SR;y+=P*2)for(let x=P+SR;x<w-P-SR;x+=P*2){const k=y*w+x;if(ai[k]>140&&aj[k]>140)cand.push(k)}
+    const step=Math.max(1,Math.ceil(cand.length/16));
+    for(let ci=0;ci<cand.length;ci+=step){tried++;const k=cand[ci],cx=k%w,cy=(k/w)|0;
+      let m=0,N=0;for(let v=-P;v<P;v++)for(let u=-P;u<P;u++){m+=li[(cy+v)*w+cx+u];N++}m/=N;
+      const T=new Float32Array(N);let vt=0;for(let v=-P,q=0;v<P;v++)for(let u=-P;u<P;u++,q++){const dd=li[(cy+v)*w+cx+u]-m;T[q]=dd;vt+=dd*dd}
+      if(vt/N<80)continue; // too flat to match
+      let best=-1,bx=0,by=0;
+      for(let dy=-SR;dy<=SR;dy++)for(let dx=-SR;dx<=SR;dx++){let sj=0,sjj=0,sij=0,q=0,bad=false;
+        for(let v=-P;v<P;v++){const r=(cy+dy+v)*w+cx+dx;for(let u=-P;u<P;u++,q++){const p=r+u;if(aj[p]<60){bad=true;break}const lv=lj[p];sj+=lv;sjj+=lv*lv;sij+=T[q]*lv}if(bad)break}
+        if(bad)continue;const vj=sjj-sj*sj/N;if(vj<1)continue;const ncc=sij/Math.sqrt(vt*vj);if(ncc>best){best=ncc;bx=dx;by=dy}}
+      if(best<.85||Math.abs(bx)===SR||Math.abs(by)===SR)continue;
+      // feature sits at direction A in photo i and at B in photo j. Rotation B->A = axis (B x A) * angle
+      const A=dir(cx,cy),B=dir(cx+bx,cy+by);let X=[B[1]*A[2]-B[2]*A[1],B[2]*A[0]-B[0]*A[2],B[0]*A[1]-B[1]*A[0]];
+      const s=Math.hypot(X[0],X[1],X[2]);if(s<1e-6)continue;const f=Math.asin(Math.min(1,s))/s;X=[X[0]*f,X[1]*f,X[2]*f];
+      if(Math.hypot(X[0],X[1],X[2])>.1)continue; // >5.7° = outlier
+      out.push(i,j,X[0],X[1],X[2],best,Math.hypot(bx,by)*(360/w))}}
+  return{m:new Float32Array(out),tried};
+}
+function runMatch(msg,tr){return new Promise(res=>{
+  if(typeof Worker==='undefined'){res(matchWork(msg));return}
+  const src='self.onmessage=e=>self.postMessage(('+matchWork.toString()+')(e.data))',wk=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
+  wk.onmessage=e=>{res(e.data);wk.terminate()};wk.onerror=()=>{wk.terminate();res({m:new Float32Array(0),tried:1})};wk.postMessage(msg,tr)})}
 async function align(){
-  const n=caps.length,P=7,SR=6,dq=new Q(),A=new V3(),B=new V3(),X=new V3(),fw=caps.map(()=>new V3());
-  const upFw=()=>caps.forEach((c,i)=>fw[i].set(0,0,-1).applyQuaternion(c.qa));upFw();
-  for(const [ri,w] of [512,512,1024,1024].entries()){
-    status(.02+.07*ri/4,`Aligning photos ${ri+1}/4`);await tick();
-    const h=w/2,rt=new THREE.WebGLRenderTarget(w,h),L=[],Al=[],buf=new Uint8Array(w*h*4);photoMat.blending=THREE.NoBlending;
+  const n=caps.length,dq=new Q(),X=new V3(),fw=caps.map(()=>new V3()),upFw=()=>caps.forEach((c,i)=>fw[i].set(0,0,-1).applyQuaternion(c.qa));upFw();
+  const solve=async w=>{const h=w/2,rt=new THREE.WebGLRenderTarget(w,h),L=[],Al=[],buf=new Uint8Array(w*h*4);photoMat.blending=THREE.NoBlending;
     for(let i=0;i<n;i++){setPhoto(caps[i],caps[i].thumbTex,1,1);renderer.setRenderTarget(rt);renderer.clear();pass(photoMat,rt);renderer.readRenderTargetPixels(rt,0,0,w,h,buf);
       const l=new Uint8Array(w*h),a=new Uint8Array(w*h);for(let p=0;p<w*h;p++){const o=p*4;l[p]=(buf[o]*77+buf[o+1]*150+buf[o+2]*29)>>8;a[p]=buf[o+3]}L.push(l);Al.push(a)}
-    rt.dispose();const sx=new Float64Array(n*3),sc=new Float64Array(n);
-    for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){
-      if(fw[i].dot(fw[j])<.17)continue; // viewing directions >80° apart: no overlap
-      const li=L[i],lj=L[j],ai=Al[i],aj=Al[j],cand=[];
-      for(let y=Math.round(h*.11)+P+SR;y<h*.89-P-SR;y+=P*2)for(let x=P+SR;x<w-P-SR;x+=P*2){const k=y*w+x;if(ai[k]>140&&aj[k]>140)cand.push(k)}
-      const step=Math.max(1,Math.ceil(cand.length/16));
-      for(let ci=0;ci<cand.length;ci+=step){const k=cand[ci],cx=k%w,cy=(k/w)|0;
-        let m=0,N=0;for(let v=-P;v<P;v++)for(let u=-P;u<P;u++){m+=li[(cy+v)*w+cx+u];N++}m/=N;
-        const T=new Float32Array(N);let vt=0;for(let v=-P,q=0;v<P;v++)for(let u=-P;u<P;u++,q++){const d=li[(cy+v)*w+cx+u]-m;T[q]=d;vt+=d*d}
-        if(vt/N<80)continue; // too flat to match
-        let best=-1,bx=0,by=0;
-        for(let dy=-SR;dy<=SR;dy++)for(let dx=-SR;dx<=SR;dx++){let sj=0,sjj=0,sij=0,q=0,bad=false;
-          for(let v=-P;v<P;v++){const r=(cy+dy+v)*w+cx+dx;for(let u=-P;u<P;u++,q++){const p=r+u;if(aj[p]<60){bad=true;break}const lv=lj[p];sj+=lv;sjj+=lv*lv;sij+=T[q]*lv}if(bad)break}
-          if(bad)continue;const vj=sjj-sj*sj/N;if(vj<1)continue;const ncc=sij/Math.sqrt(vt*vj);if(ncc>best){best=ncc;bx=dx;by=dy}}
-        if(best<.85||Math.abs(bx)===SR||Math.abs(by)===SR)continue;
-        // feature sits at direction A in photo i's render and at B in photo j's render. Rotation B->A (axis B x A):
-        eqDir(w,h,cx,cy,A);eqDir(w,h,cx+bx,cy+by,B);X.crossVectors(B,A);const s=X.length();if(s<1e-6)continue;
-        X.multiplyScalar(Math.asin(Math.min(1,s))/s);if(X.length()>.1)continue; // reject >5.7° outliers
-        sx[j*3]+=X.x*best*.5;sx[j*3+1]+=X.y*best*.5;sx[j*3+2]+=X.z*best*.5;sx[i*3]-=X.x*best*.5;sx[i*3+1]-=X.y*best*.5;sx[i*3+2]-=X.z*best*.5;sc[i]+=best;sc[j]+=best}}
-    for(let i=0;i<n;i++){if(sc[i]<2)continue;X.set(sx[i*3],sx[i*3+1],sx[i*3+2]).multiplyScalar(1.6/sc[i]);const a=X.length();if(a<1e-6)continue;
-      caps[i].qa.premultiply(dq.setFromAxisAngle(X.divideScalar(a),Math.min(a,.07)))} // world-frame correction: q' = R * q
+    rt.dispose();const pairs=[];for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)if(fw[i].dot(fw[j])>=.17)pairs.push([i,j]); // >80° apart = no overlap
+    return runMatch({w,h,L,Al,pairs,P:7,SR:6},[...L,...Al].map(a=>a.buffer))};
+  for(const [ri,w] of [512,512,1024,1024].entries()){
+    status(.02+.07*ri/4,`Aligning photos ${ri+1}/4`);await tick();
+    if(ri===2){ // joint FOV fit: keep the FOV (±3%) for which matches need the smallest corrections
+      const f0=S.fov;let bf=f0,bs=1e9;
+      for(const f of [f0*.97,f0,f0*1.03]){S.fov=f;const r=await solve(512);let sd=0;for(let q=6;q<r.m.length;q+=7)sd+=r.m[q];const k=r.m.length/7,sc=(sd+(r.tried-k)*3)/Math.max(1,r.tried);if(sc<bs){bs=sc;bf=f}}
+      S.fov=bf;$('fov').value=bf.toFixed(1);$('fovv').textContent=bf.toFixed(1)+'°'}
+    const r=await solve(w),m=r.m,sx=new Float64Array(n*3),sc=new Float64Array(n),mc=new Float64Array(n);
+    for(let k=0;k<m.length;k+=7){const i=m[k],j=m[k+1],wt=m[k+5];for(let a=0;a<3;a++){sx[j*3+a]+=m[k+2+a]*wt*.5;sx[i*3+a]-=m[k+2+a]*wt*.5}sc[i]+=wt;sc[j]+=wt;mc[i]++;mc[j]++}
+    for(let i=0;i<n;i++){caps[i].weak=mc[i]<3;if(sc[i]<2)continue;X.set(sx[i*3],sx[i*3+1],sx[i*3+2]).multiplyScalar(1.6/sc[i]);const a=X.length();if(a<1e-6)continue;
+      caps[i].qa.premultiply(dq.setFromAxisAngle(X.divideScalar(a),Math.min(a,.07)))}
     upFw()}
 }
 function status(p,t){$('sbar').style.width=(p*100)+'%';$('stxt').textContent=t}
@@ -325,15 +351,19 @@ async function stitch(){
   for(let i=0;i<n;i++){setPhoto(caps[i],caps[i].thumbTex,1,1);renderer.setRenderTarget(low);renderer.clear();pass(photoMat,low);
     const b=new Uint8Array(SW*SH*4);renderer.readRenderTargetPixels(low,0,0,SW,SH,b);maps.push(b)}
   low.dispose();
-  const sum=new Float64Array(n*n),cnt=new Float64Array(n*n),ix=[],lm=[];
-  for(let p=0;p<SW*SH;p++){ix.length=0;lm.length=0;
-    for(let i=0;i<n;i++){const o=p*4,b=maps[i];if(b[o+3]>50){ix.push(i);lm.push(.2126*LUT[b[o]]+.7152*LUT[b[o+1]]+.0722*LUT[b[o+2]])}}
-    for(let a=0;a<ix.length;a++)for(let c=0;c<ix.length;c++)if(a!==c){sum[ix[a]*n+ix[c]]+=lm[a];cnt[ix[a]*n+ix[c]]++}}
-  let g=new Float64Array(n).fill(1);
-  for(let it=0;it<30;it++){const ng=new Float64Array(n);
-    for(let i=0;i<n;i++){let a=0,b=0;for(let j=0;j<n;j++){const c=cnt[i*n+j];if(c<50)continue;const Aij=sum[i*n+j]/c,Aji=sum[j*n+i]/c;if(Aij<1e-4||Aji<1e-4)continue;a+=c*g[j]*Aji/Aij;b+=c}
-      ng[i]=b?a/b:g[i]}
-    let ml=0;for(let i=0;i<n;i++)ml+=Math.log(ng[i]);ml=Math.exp(ml/n);for(let i=0;i<n;i++)g[i]=Math.min(2,Math.max(.5,ng[i]/ml))}
+  // per-channel gains: match colour as well as brightness between neighbours
+  const G=[0,1,2].map(()=>new Float64Array(n).fill(1)),cnt=new Float64Array(n*n),sum=[0,1,2].map(()=>new Float64Array(n*n)),ix=[];
+  for(let p=0;p<SW*SH;p++){ix.length=0;for(let i=0;i<n;i++)if(maps[i][p*4+3]>50)ix.push(i);
+    for(const a of ix)for(const c of ix)if(a!==c){const k=a*n+c;cnt[k]++;for(let ch=0;ch<3;ch++)sum[ch][k]+=LUT[maps[a][p*4+ch]]}}
+  for(let ch=0;ch<3;ch++){const g=G[ch],sm=sum[ch];
+    for(let it=0;it<30;it++){const ng=new Float64Array(n);
+      for(let i=0;i<n;i++){let a=0,b=0;for(let j=0;j<n;j++){const c=cnt[i*n+j];if(c<50)continue;const Aij=sm[i*n+j]/c,Aji=sm[j*n+i]/c;if(Aij<1e-4||Aji<1e-4)continue;a+=c*g[j]*Aji/Aij;b+=c}ng[i]=b?a/b:g[i]}
+      let ml=0;for(let i=0;i<n;i++)ml+=Math.log(ng[i]);ml=Math.exp(ml/n);for(let i=0;i<n;i++)g[i]=Math.min(1.8,Math.max(.55,ng[i]/ml))}}
+  // pole holes: find the latitude where coverage becomes complete; the final pass mirror-clones from just inside it
+  const cov=new Uint8Array(SW*SH);for(const m of maps)for(let p=0;p<SW*SH;p++)if(m[p*4+3]>50)cov[p]=1;
+  const rowF=y=>{let k=0;for(let x=0;x<SW;x++)k+=cov[y*SW+x];return k/SW};
+  let yb=0;while(yb<SH/2&&rowF(yb)<.97)yb++;let yt=SH-1;while(yt>SH/2&&rowF(yt)<.97)yt--;
+  finMat.uniforms.latB.value=yb?((yb+.5)/SH-.5)*Math.PI:-9;finMat.uniforms.latT.value=yt<SH-1?((yt+.5)/SH-.5)*Math.PI:9;
   // --- 6b. weighted additive accumulation, one pass per photo
   const acc=new THREE.WebGLRenderTarget(W,H,HF),accH=new THREE.WebGLRenderTarget(W,H,HF),prev=new THREE.WebGLRenderTarget(512,256);
   renderer.setRenderTarget(acc);renderer.clear();renderer.setRenderTarget(accH);renderer.clear();renderer.setRenderTarget(null);
@@ -343,7 +373,7 @@ async function stitch(){
     status(.1+.8*i/n,`Photo ${i+1} of ${n}`);await tick();
     const bmp=await createImageBitmap(caps[i].blob),cv=document.createElement('canvas');cv.width=bmp.width;cv.height=bmp.height;cv.getContext('2d').drawImage(bmp,0,0);bmp.close();
     const tex=new THREE.CanvasTexture(cv);tex.minFilter=THREE.LinearMipmapLinearFilter;tex.generateMipmaps=true;
-    setPhoto(caps[i],tex,0,g[i]);photoMat.uniforms.band.value=0;pass(photoMat,acc);photoMat.uniforms.band.value=1;pass(photoMat,accH);tex.dispose();cv.width=cv.height=0;
+    setPhoto(caps[i],tex,0,[G[0][i],G[1][i],G[2][i]]);photoMat.uniforms.band.value=0;pass(photoMat,acc);photoMat.uniforms.band.value=1;pass(photoMat,accH);tex.dispose();cv.width=cv.height=0;
     finMat.uniforms.fill.value=0;pass(finMat,prev);pc.putImageData(rtToImageData(prev,512,256),0,0)} // live low-res preview
   // --- 6c. hole filling pyramid + final divide
   status(.92,'Filling gaps');await tick();
@@ -361,7 +391,8 @@ const vMat=new THREE.ShaderMaterial({side:THREE.BackSide,uniforms:{map:{value:nu
   vertexShader:'varying vec3 vD;void main(){vD=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
   fragmentShader:'varying vec3 vD;uniform sampler2D map;void main(){vec3 d=normalize(vD);vec2 uv=vec2(atan(d.x,-d.z)/6.2831853+.5,asin(d.y)/3.1415927+.5);gl_FragColor=vec4(texture2D(map,uv).rgb,1.);}'}); // same lon/lat convention as the stitcher
 vScene.add(new THREE.Mesh(new THREE.SphereGeometry(10,64,32),vMat));
-function openResult(){vMat.uniforms.map.value=outRT.texture;vCam.rotation.set(0,0,0);show('res')}
+function openResult(){vMat.uniforms.map.value=outRT.texture;vCam.rotation.set(0,0,0);const w=caps.filter(c=>c.weak);
+  $('warn').textContent=w.length?`${w.length} photo${w.length>1?'s':''} matched neighbours poorly (dots ${w.map(c=>c.idx+1).join(', ')}). Capturing again may help.`:'';show('res')}
 let drag=null;
 glc.addEventListener('touchstart',e=>{if(state==='res'&&e.touches.length===1)drag=[e.touches[0].clientX,e.touches[0].clientY]},{passive:true});
 glc.addEventListener('touchmove',e=>{if(!drag||state!=='res')return;const t=e.touches[0],k=vCam.fov*D2R/innerHeight;
@@ -374,22 +405,34 @@ $('res').addEventListener('touchmove',e=>{if(e.target===$('res'))glc.dispatchEve
 function dl(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
 function eqBlob(type){const c=document.createElement('canvas');c.width=outW;c.height=outH;c.getContext('2d').putImageData(rtToImageData(outRT,outW,outH),0,0);
   return new Promise(r=>c.toBlob(r,type,.95))}
-// Radiance RGBE: sRGB -> linear, then expand the brightest (clipped) pixels by up to (1+boost) so lights act as light sources.
-function hdrBlob(boost){
+// Radiance RGBE export: sRGB -> linear, EV, then light handling.
+//  LIGHT DETECTION: connected blobs of clipped near-white pixels are treated as lights; each blob gets radiance L = strength / max(solid angle, 5e-4 sr)
+//  (irradiance ~ "strength" in Blender sun-strength-like units; tiny blobs are capped). Other near-clipped pixels get the soft highlight boost.
+function hdrBlob(boost,strength,ev){
   const W=outW,H=outH,b=new Uint8Array(W*H*4);renderer.readRenderTargetPixels(outRT,0,0,W,H,b);
+  const dW=6.2831853/W,dH=3.1415927/H,ex=Math.pow(2,ev),Lb=[0];let id=null;
+  if(strength>0){id=new Uint16Array(W*H);const stack=[];
+    const clip=p=>{const o=p*4,r=b[o],g=b[o+1],bl=b[o+2];return Math.max(r,g,bl)>=250&&Math.min(r,g,bl)>=190};
+    for(let s=0;s<W*H&&Lb.length<65000;s++){if(id[s]||!clip(s))continue;
+      const bid=Lb.length;id[s]=bid;stack.length=0;stack.push(s);let om=0;
+      while(stack.length){const p=stack.pop(),y=(p/W)|0,x=p-y*W;om+=dW*dH*Math.cos(((y+.5)/H-.5)*3.1415927);
+        const nb=[y>0?p-W:-1,y<H-1?p+W:-1,x>0?p-1:p+W-1,x<W-1?p+1:p-W+1];for(const q of nb)if(q>=0&&!id[q]&&clip(q)){id[q]=bid;stack.push(q)}}
+      Lb.push(om>4e-5?strength/Math.max(om,5e-4):0)}}
   const head=new TextEncoder().encode(`#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y ${H} +X ${W}\n`),out=new Uint8Array(head.length+W*H*4);out.set(head);let o=head.length;
-  for(let y=0;y<H;y++){let p=(H-1-y)*W*4;
-    for(let x=0;x<W;x++,p+=4){const r=b[p],g=b[p+1],bl=b[p+2];let t=(Math.max(r,g,bl)/255-.8)/.2;t=t<0?0:t>1?1:t;t=t*t*(3-2*t);
-      const k=1+boost*t*t,R=LUT[r]*k,G=LUT[g]*k,B=LUT[bl]*k,m=Math.max(R,G,B);
+  for(let y=0;y<H;y++){let p=(H-1-y)*W*4,pi=(H-1-y)*W;
+    for(let x=0;x<W;x++,p+=4,pi++){const r=b[p],g=b[p+1],bl=b[p+2];let k=id?Lb[id[pi]]:0;
+      if(!(k>0)){let t=(Math.max(r,g,bl)/255-.8)/.2;t=t<0?0:t>1?1:t;t=t*t*(3-2*t);k=1+boost*t*t}
+      k*=ex;const R=LUT[r]*k,G=LUT[g]*k,B=LUT[bl]*k,m=Math.max(R,G,B);
       if(m<1e-32){o+=4;continue}
       const e=Math.floor(Math.log2(m))+1,s=256/Math.pow(2,e);out[o++]=R*s;out[o++]=G*s;out[o++]=B*s;out[o++]=e+128}}
   return new Blob([out],{type:'application/octet-stream'})}
+const hdr=()=>hdrBlob(+$('hb').value,+$('ls').value,+$('ev').value);
 $('dJpg').onclick=async()=>dl(await eqBlob('image/jpeg'),'freehdri.jpg');
 $('dPng').onclick=async()=>dl(await eqBlob('image/png'),'freehdri.png');
-$('dHdr').onclick=()=>dl(hdrBlob(+$('hb').value),'freehdri.hdr');
+$('dHdr').onclick=()=>dl(hdr(),'freehdri.hdr');
 $('hb').oninput=e=>$('hbv').textContent=e.target.value+'×';
 $('dShare').onclick=async()=>{try{
-  const files=[new File([await eqBlob('image/jpeg')],'freehdri.jpg',{type:'image/jpeg'}),new File([hdrBlob(+$('hb').value)],'freehdri.hdr',{type:'application/octet-stream'})];
+  const files=[new File([await eqBlob('image/jpeg')],'freehdri.jpg',{type:'image/jpeg'}),new File([hdr()],'freehdri.hdr',{type:'application/octet-stream'})];
   if(navigator.canShare&&navigator.canShare({files}))await navigator.share({files,title:'FreeHDRI'});
   else await navigator.share({files:[files[0]],title:'FreeHDRI'})}catch(e){}};
 /* ---- AI cleanup: copy a prompt for Gemini/ChatGPT, then import the fixed image back (replaces the stitched result, so .hdr export uses it) ---- */
@@ -402,6 +445,25 @@ $('aiFile').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f
   const tex=new THREE.CanvasTexture(c);tex.minFilter=THREE.LinearFilter;tex.generateMipmaps=false;copyMat.uniforms.map.value=tex;pass(copyMat,outRT);tex.dispose()};
 $('again').onclick=()=>{show('start')};
 
+/* ============ 8b. SESSION SAVE (IndexedDB) ============ */
+// iOS kills tabs under memory pressure. Every capture is stored as it happens; "Recover last session" re-stitches from the saved photos.
+const DB={db:null,async o(){return this.db||(this.db=await new Promise((res,rej)=>{const r=indexedDB.open('freehdri',1);r.onupgradeneeded=()=>r.result.createObjectStore('s');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)}))},
+  async x(m,f){const db=await this.o();return new Promise((res,rej)=>{const t=db.transaction('s',m),q=f(t.objectStore('s'));t.oncomplete=()=>res(q&&q.result);t.onerror=()=>rej(t.error)})},
+  put(k,v){return this.x('readwrite',s=>s.put(v,k))},get(k){return this.x('readonly',s=>s.get(k))},clear(){return this.x('readwrite',s=>s.clear())}};
+function persist(){try{caps.forEach(c=>{if(!c.saved){c.saved=true;DB.put('cap'+c.idx,{blob:c.blob,q:c.q.toArray(),idx:c.idx,asp:c.asp}).catch(()=>{c.saved=false})}});
+  DB.put('meta',{preset:S.preset,fov:S.fov,snap:S.snap,order:caps.map(c=>c.idx)}).catch(()=>{})}catch(e){}}
+async function recover(){
+  const meta=await DB.get('meta');if(!meta||!meta.order)return;Object.assign(S,{preset:meta.preset,fov:meta.fov,snap:!!meta.snap});
+  $('preset').value=S.preset;$('fov').value=S.fov;$('fovv').textContent=S.fov+'°';$('snap').checked=S.snap;buildDots();caps=[];hist=[];
+  for(const idx of meta.order){const r=await DB.get('cap'+idx);if(!r)continue;
+    const bmp=await createImageBitmap(r.blob),tc=document.createElement('canvas');tc.width=512;tc.height=Math.round(512*bmp.height/bmp.width);tc.getContext('2d').drawImage(bmp,0,0,tc.width,tc.height);bmp.close();
+    const t=new THREE.CanvasTexture(tc);t.minFilter=THREE.LinearFilter;t.generateMipmaps=false;
+    caps.push({blob:r.blob,q:new Q(...r.q),idx,asp:r.asp,thumbTex:t,group:new THREE.Group(),saved:true})}
+  if(caps.length>1)stitch()}
+$('btnResume').onclick=recover;
+DB.get('meta').then(m=>{if(m&&m.order&&m.order.length>2){$('btnResume').style.display='';$('btnResume').textContent='Recover last session ('+m.order.length+' photos)'}}).catch(()=>{});
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{}); // optional: sw.js next to index.html enables offline use
+
 /* ============ 9. UI WIRING ============ */
 $('btnStart').onclick=async()=>{ $('err').textContent='';
   try{await askMotion();await askCamera();await waitEv();await askWake();setReference();startCapture()}
@@ -410,7 +472,8 @@ $('btnUndo').onclick=undo;$('btnSkip').onclick=skip;$('btnFinish').onclick=()=>{
 const openSheet=()=>$('sheet').classList.add('on');$('btnSet0').onclick=$('btnSet1').onclick=openSheet;$('sheetClose').onclick=()=>$('sheet').classList.remove('on');
 $('fov').oninput=e=>{S.fov=+e.target.value;$('fovv').textContent=S.fov+'°'};
 $('hold').oninput=e=>{S.hold=+e.target.value;$('holdv').textContent=S.hold+' ms'};
-$('qual').onchange=e=>S.maxSide=+e.target.value;$('outw').onchange=e=>S.outW=+e.target.value;$('snap').onchange=e=>S.snap=e.target.checked;$('align').onchange=e=>S.align=e.target.checked;
+$('qual').onchange=e=>S.maxSide=+e.target.value;$('outw').onchange=e=>S.outW=+e.target.value;$('snap').onchange=e=>S.snap=e.target.checked;$('align').onchange=e=>S.align=e.target.checked;$('vig').oninput=e=>{S.vig=+e.target.value;$('vigv').textContent=S.vig.toFixed(2)};
+$('ls').oninput=e=>$('lsv').textContent=e.target.value;$('ev').oninput=e=>$('evv').textContent=e.target.value;
 $('preset').onchange=e=>{S.preset=e.target.value;if(state==='cap'&&!caps.length){buildDots();updateProg()}};
 addEventListener('resize',resize);resize();
 (function loop(t){requestAnimationFrame(loop);if(state==='cap')capFrame(t);else if(state==='res')renderer.render(vScene,vCam)})(0);
